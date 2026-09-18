@@ -1,0 +1,126 @@
+---
+title: "PTCL-NOS_subtyping"
+author: "Putri Ramadani"
+date: "2026-09-18"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+1. Load library
+```{r}
+library(data.table)
+library(readxl)
+library(dplyr)
+library(stringr)
+library(ggplot2)
+library(ComplexHeatmap)
+library(circlize)
+library(grid)
+
+# library to read CEL.gz
+BiocManager::install(c("affy", "oligo", "affyio"))
+library(affyio)
+library(affy)
+
+BiocManager::install(c("hgu133plus2.db", "AnnotationDbi"))
+library(AnnotationDbi)
+library(hgu133plus2.db)
+
+
+# read GEO SOFT locally
+#BiocManager::install("GEOquery", update = FALSE, ask = FALSE)
+#library(GEOquery)
+
+# edgeR & singscore
+#if (!requireNamespace("edgeR", quietly = TRUE)) install.packages("edgeR")
+#library(edgeR)
+#devtools::install_github('DavisLaboratory/singscore')
+#library(singscore)
+
+```
+
+2. Paths and dir
+```{r}
+setwd("/Users/putriramadani/Documents/GitHub/PTCL-NOS_subtyping")
+
+root <- normalizePath(".")   
+
+data_dir <- file.path(root, "data")
+fig_dir  <- file.path(root, "figures")
+res_dir  <- file.path(root, "result")
+
+counts_file <- file.path(data_dir, "GSE58445_RAW.tar")
+soft_file   <- file.path(data_dir, "GSE58445_family.soft.gz")
+```
+
+3. Load and read counts_file
+```{r}
+exdir <- file.path(data_dir, "cel_raw") 
+dir.create(exdir, showWarnings = FALSE, recursive = TRUE)
+
+# .CEL.gz files are Affymetrix microarray raw data, not a count table, 
+# so read.delim() won't work on them and there are no counts to merge
+
+
+# --- 1. extract and list cel files ---
+untar(counts_file, exdir = file.path(data_dir, "cel_raw"))
+
+cel_files <- list.files(file.path(data_dir, "cel_raw"),
+                        pattern = "\\.CEL(\\.gz)?$",
+                        full.names = TRUE, recursive = TRUE,
+                        ignore.case = TRUE)
+length(cel_files)
+# [1] 193
+
+
+# --- 2. check what array platform ---
+library(affyio)
+read.celfile.header(cel_files[1])$cdfName
+#[1] "HG-U133_Plus_2" 
+
+
+library(affy)
+raw  <- ReadAffy(filenames = cel_files)   # reads .gz directly
+eset <- rma(raw)                          # background correction + quantile norm + summarization
+expr <- exprs(eset)                       # probesets x samples, log2 scale
+# --- output message ---:
+# Background correcting
+# Normalizing
+# Calculating Expression
+# ----------------------
+
+
+# clean sample names to GSM IDs
+colnames(expr) <- sub("_.*", "", basename(cel_files))
+dim(expr)
+# [1] 54675   193
+# 56475 rows = probesets (features on the array)
+# 193 = columns = samples, one per CEL file
+
+
+
+# 3. --- Map probes to gene symbols ---
+library(AnnotationDbi)
+library(hgu133plus2.db)
+
+map <- AnnotationDbi::select(hgu133plus2.db, keys = rownames(expr),
+                             columns = "SYMBOL", keytype = "PROBEID")
+map <- map[!is.na(map$SYMBOL) & !duplicated(map$PROBEID), ]
+
+expr_gene <- expr[map$PROBEID, ]
+# collapse multiple probes per gene by mean
+expr_gene <- rowsum(expr_gene, group = map$SYMBOL) / as.vector(table(map$SYMBOL)[rownames(rowsum(expr_gene, map$SYMBOL))])
+
+
+# 4. --- save ---
+saveRDS(expr_gene, file.path(res_dir, "expr_gene_rma.rds"))
+write.csv(expr_gene, file.path(res_dir, "expr_gene_rma.csv"))
+
+```
+Since this is microarray data, downstream analyses should use log2 expression, so use limma for differential expression rather than DESeq2 or edgeR.
+
+
+
